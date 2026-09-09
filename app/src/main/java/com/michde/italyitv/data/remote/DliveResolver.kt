@@ -39,7 +39,16 @@ object DliveResolver {
     private val IFRAME = Pattern.compile(
         """<iframe[^>]+src=["']([^"']+premiumtv/[^"']+)["']""", Pattern.CASE_INSENSITIVE
     )
+    private val ANY_IFRAME = Pattern.compile(
+        """<iframe[^>]+src=["']([^"']+)["']""", Pattern.CASE_INSENSITIVE
+    )
     private val ATOB = Pattern.compile("""atob\(["']([A-Za-z0-9+/=]+)["']\)""")
+    /** the watch page's player-selector buttons: data-url="https://dlive.sx/<seg>/stream-<id>.php" */
+    private val PLAYER_URL = Pattern.compile(
+        """data-url=["'](https?://[^"']+/stream-\d+\.php)["']""", Pattern.CASE_INSENSITIVE
+    )
+    /** fallback player-page path segments, in the order dlive lists "Player 1..7". */
+    private val PLAYER_SEGMENTS = listOf("stream", "cast", "watch", "plus", "casting", "player", "hub")
     private const val TIMEOUT = 10_000
 
     fun isDlive(url: String): Boolean =
@@ -61,23 +70,53 @@ object DliveResolver {
      * `Referer: https://dlive.sx/`, so the WebView must send that header.
      * Path differs per channel and rotates, so we scrape it, never guess.
      */
-    fun playerPageUrl(watchUrl: String?): String? {
-        if (watchUrl.isNullOrEmpty()) return null
+    fun playerPageUrl(watchUrl: String?): String? = playerPageUrls(watchUrl).firstOrNull()
+
+    /**
+     * The distinct player backends behind dlive's "Player 1..7" selector, in
+     * order — `hamis…/daddyN.php`, `barecrop.net/e/…`, `wideiptv.top/…`, etc.
+     * Each wrapper page (`…/stream/…`, `…/cast/…`, `…/hub/…`) embeds one of these
+     * in an iframe; we pull the iframe src out so the WebView can load the real
+     * player as its main document (referer `https://dlive.sx/`) and, when one is
+     * dead, move straight to the next.
+     */
+    fun playerPageUrls(watchUrl: String?): List<String> {
+        if (watchUrl.isNullOrEmpty()) return emptyList()
         val id = channelId(watchUrl)
 
-        findIframe(id)?.let {
-            Log.i(TAG, "playerPage id=$id -> $it")
-            return it
+        // 1. wrapper pages, in the order the site lists them
+        val wrappers: List<String> = run {
+            for (host in WATCH_HOSTS) {
+                val html = httpGet("https://$host/watch.php?id=$id", referer = "https://$host/") ?: continue
+                val m = PLAYER_URL.matcher(html)
+                val urls = LinkedHashSet<String>()
+                while (m.find()) urls.add(m.group(1)!!)
+                if (urls.size >= 2) return@run urls.toList()
+            }
+            val host = WATCH_HOSTS.firstOrNull { httpHead("https://$it/watch.php?id=$id") } ?: WATCH_HOSTS[0]
+            PLAYER_SEGMENTS.map { "https://$host/$it/stream-$id.php" }
         }
-        for (n in listOf("", "2", "3", "4", "5", "6", "7", "8", "9", "1")) {
-            val ep = "https://$FALLBACK_PREMIUM_HOST/premiumtv/daddy$n.php?id=$id"
-            if (httpHead(ep)) {
-                Log.i(TAG, "playerPage id=$id -> $ep (brute)")
-                return ep
+
+        // 2. resolve each wrapper to the real player URL inside it
+        val backends = LinkedHashSet<String>()
+        for (w in wrappers) {
+            val wHost = hostOf(w)
+            val html = httpGet(w, referer = "https://$wHost/watch.php?id=$id") ?: continue
+            val mi = ANY_IFRAME.matcher(html)
+            if (mi.find()) {
+                val src = absolutize(mi.group(1)!!.trim(), wHost)
+                // keep the #fragment — SPA players (welovetocare, …) need it to pick the channel
+                if (src.startsWith("http") && !src.contains("javascript:") && !src.startsWith("about:")) {
+                    backends.add(src)
+                }
             }
         }
-        Log.w(TAG, "playerPage id=$id -> falling back to $watchUrl")
-        return watchUrl
+        if (backends.isNotEmpty()) {
+            Log.i(TAG, "playerPages id=$id -> ${backends.size} backends: $backends")
+            return backends.toList()
+        }
+        Log.w(TAG, "playerPages id=$id -> no backends, using wrappers")
+        return wrappers
     }
 
     /** Referer the player page and its stream demand. */

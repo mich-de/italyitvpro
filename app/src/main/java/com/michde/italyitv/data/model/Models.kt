@@ -21,7 +21,12 @@ data class ResolvedStream(
     val referer: String? = null,
     val origin: String? = null,
     val userAgent: String? = null,
-)
+    /** further URLs to try, in order, if [url] fails to play */
+    val fallbacks: List<String> = emptyList(),
+) {
+    /** [url] first, then every distinct fallback. */
+    val allUrls: List<String> get() = (listOf(url) + fallbacks).distinct()
+}
 
 /** A fully enriched channel shown in the UI. */
 data class Channel(

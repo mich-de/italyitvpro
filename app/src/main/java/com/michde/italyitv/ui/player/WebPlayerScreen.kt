@@ -14,14 +14,23 @@ import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.layout.Column
@@ -29,6 +38,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -36,21 +46,31 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.michde.italyitv.data.remote.DliveResolver
 import com.michde.italyitv.ui.AppViewModel
+import com.michde.italyitv.ui.tvFocusable
 
 /**
  * Hosts whose sub-requests we drop outright (ad / pop-under / tracker noise).
@@ -88,18 +108,39 @@ fun WebPlayerScreen(
 ) {
     BackHandler(onBack = onBack)
     val channel = remember(channelKey) { vm.channel(channelKey) }
+    val nowNextMap by vm.nowNext.collectAsStateWithLifecycle()
+    val nowNext = nowNextMap[channelKey]
     var attempt by remember { mutableIntStateOf(0) }
 
-    val pageUrl by produceState<String?>(initialValue = null, channelKey, attempt) {
-        value = null
+    // on-screen display (controls + channel/EPG bar): shown on tap/key, auto-hides
+    var osdVisible by remember { mutableStateOf(true) }
+    var osdNonce by remember { mutableIntStateOf(0) }
+    val rootFocus = remember { FocusRequester() }
+    val firstBtnFocus = remember { FocusRequester() }
+    fun wake() { osdVisible = true; osdNonce++ }
+
+    // dlive offers several "Player 1..7" backends; we walk them on failure
+    val players by produceState<List<String>>(emptyList(), channelKey, attempt) {
         val ch = channel
-        value = if (ch == null) null
-        else runCatching { vm.repo.dlivePlayerPage(ch) }.getOrNull() ?: ch.url
+        value = if (ch == null) emptyList()
+        else runCatching { vm.repo.dlivePlayerPages(ch) }.getOrDefault(emptyList())
+            .ifEmpty { listOf(ch.url) }
     }
+    var playerIdx by remember(channelKey, attempt) { mutableIntStateOf(0) }
+    val pageUrl = players.getOrNull(playerIdx)
 
     var loading by remember { mutableStateOf(true) }
     var failed by remember { mutableStateOf(false) }
+    var retrying by remember { mutableStateOf(false) }
+    var autoTries by remember { mutableIntStateOf(0) }
+    var lastFatalAt by remember { mutableLongStateOf(0L) }
     val webHolder = remember { WebHolder() }
+
+    fun toPlayer(idx: Int) {
+        playerIdx = idx
+        loading = true; failed = false
+        webHolder.loaded = null
+    }
 
     val bridge = remember {
         object {
@@ -107,11 +148,43 @@ fun WebPlayerScreen(
             fun report(state: String) {
                 webHolder.web?.post {
                     when (state) {
-                        "playing" -> { loading = false; failed = false }
-                        "fatal" -> { loading = false; failed = true }
+                        "playing" -> { loading = false; failed = false; retrying = false; autoTries = 0 }
+                        "fatal" -> {
+                            val now = System.currentTimeMillis()
+                            if (now - lastFatalAt < 2_500) return@post // ignore a stale page's late report
+                            lastFatalAt = now
+                            loading = false
+                            when {
+                                playerIdx < players.lastIndex -> toPlayer(playerIdx + 1) // next Player
+                                autoTries < MAX_AUTO_TRIES -> { autoTries++; retrying = true } // all failed → wait & restart
+                                else -> failed = true
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+
+    LaunchedEffect(channelKey) { autoTries = 0; retrying = false; failed = false; playerIdx = 0 }
+    LaunchedEffect(osdNonce, osdVisible) {
+        if (osdVisible) { kotlinx.coroutines.delay(4_000); osdVisible = false }
+    }
+    LaunchedEffect(osdVisible) {
+        if (osdVisible) {
+            repeat(4) { kotlinx.coroutines.delay(50); if (runCatching { firstBtnFocus.requestFocus() }.isSuccess) return@LaunchedEffect }
+        } else {
+            runCatching { rootFocus.requestFocus() }
+        }
+    }
+    LaunchedEffect(retrying) {
+        if (retrying) {
+            kotlinx.coroutines.delay(12_000)
+            retrying = false
+            playerIdx = 0
+            loading = true
+            webHolder.loaded = null
+            attempt++
         }
     }
 
@@ -127,7 +200,25 @@ fun WebPlayerScreen(
     Box(
         Modifier
             .fillMaxSize()
-            .background(Color.Black),
+            .background(Color.Black)
+            .focusRequester(rootFocus)
+            .focusable()
+            .onPreviewKeyEvent { e ->
+                val code = e.nativeKeyEvent.keyCode
+                val ignored = code == AndroidKeyEvent.KEYCODE_BACK ||
+                    code == AndroidKeyEvent.KEYCODE_VOLUME_UP ||
+                    code == AndroidKeyEvent.KEYCODE_VOLUME_DOWN ||
+                    code == AndroidKeyEvent.KEYCODE_VOLUME_MUTE
+                when {
+                    ignored -> false
+                    e.type != KeyEventType.KeyDown -> false
+                    !osdVisible -> { wake(); true }
+                    else -> { osdNonce++; false }
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures { if (osdVisible) osdVisible = false else wake() }
+            },
     ) {
         AndroidView(
             factory = { ctx ->
@@ -161,8 +252,14 @@ fun WebPlayerScreen(
                             else null
                         }
 
+                        override fun onPageStarted(v: WebView?, u: String?, favicon: android.graphics.Bitmap?) {
+                            // must run before hls.js is created — enlarge its tiny live buffer
+                            v?.evaluateJavascript(HLS_TUNE_JS, null)
+                        }
+
                         override fun onPageFinished(v: WebView?, u: String?) {
                             if (u != null && u != "about:blank") loading = false
+                            v?.evaluateJavascript(HLS_TUNE_JS, null)
                             v?.evaluateJavascript(TIDY_JS, null)
                         }
                     }
@@ -184,58 +281,102 @@ fun WebPlayerScreen(
             modifier = Modifier.fillMaxSize(),
         )
 
-        if (failed) {
+        if (failed || retrying) {
             Box(Modifier.fillMaxSize().background(Color.Black))
         }
+        val nPlayers = players.size.coerceAtLeast(1)
         when {
+            retrying -> Column(
+                Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(color = Color.White)
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Nessun player disponibile — nuovo giro tra 12 s… ($autoTries/$MAX_AUTO_TRIES)",
+                    color = Color(0xFFAAAAAA), fontSize = 12.sp,
+                )
+            }
             failed -> Column(
                 Modifier.align(Alignment.Center).padding(horizontal = 40.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(
-                    "Sorgente Daddy non disponibile",
-                    color = Color.White, fontSize = 17.sp,
-                )
+                Text("Sorgente Daddy non disponibile", color = Color.White, fontSize = 17.sp)
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "Il CDN di questo canale è bloccato a monte in questo momento. " +
-                        "Riprova tra poco, oppure usa la versione non-(Daddy) dello stesso canale.",
+                    "Nessuno dei $nPlayers player risponde in questo momento. " +
+                        "Riprova tra qualche minuto, o usa la versione non-(Daddy).",
                     color = Color(0xFFBBBBBB), fontSize = 13.sp, textAlign = TextAlign.Center,
                 )
                 Spacer(Modifier.height(10.dp))
-                IconButton(onClick = { webHolder.loaded = null; attempt++ }) {
+                IconButton(onClick = { autoTries = 0; failed = false; playerIdx = 0; webHolder.loaded = null; attempt++ }) {
                     Icon(Icons.Filled.Refresh, "Riprova", tint = Color.White)
                 }
             }
-            loading -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+            loading -> Column(
+                Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(color = Color.White)
+                if (nPlayers > 1) {
+                    Spacer(Modifier.height(12.dp))
+                    Text("Player ${playerIdx + 1}/$nPlayers", color = Color(0xFFAAAAAA), fontSize = 12.sp)
+                }
+            }
         }
 
-        Row(
-            Modifier
-                .align(Alignment.TopStart)
-                .fillMaxWidth()
-                .padding(top = 30.dp, start = 6.dp, end = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        AnimatedVisibility(
+            visible = osdVisible,
+            enter = fadeIn(), exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopStart),
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro", tint = Color.White)
-            }
-            Text(
-                channel?.name ?: "", color = Color.White, fontSize = 15.sp,
-                maxLines = 1, modifier = Modifier.padding(horizontal = 4.dp),
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                IconButton(onClick = {
-                    loading = true
-                    webHolder.loaded = null
-                    attempt++
-                }) {
-                    Icon(Icons.Filled.Refresh, "Ricarica", tint = Color.White)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Color(0x66000000))
+                    .padding(top = 24.dp, bottom = 8.dp, start = 6.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onBack, modifier = Modifier.focusRequester(firstBtnFocus).tvFocusable(CircleShape)) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro", tint = Color.White)
                 }
-                IconButton(onClick = onEnterPipNow) {
-                    Icon(Icons.Filled.PictureInPictureAlt, "PiP", tint = Color.White)
+                Text(
+                    (channel?.name ?: "") + if (players.size > 1) "  · Player ${playerIdx + 1}/${players.size}" else "",
+                    color = Color.White, fontSize = 15.sp,
+                    maxLines = 1, modifier = Modifier.padding(horizontal = 4.dp),
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    if (players.size > 1) {
+                        IconButton(
+                            onClick = { autoTries = 0; retrying = false; toPlayer((playerIdx + 1) % players.size) },
+                            modifier = Modifier.tvFocusable(CircleShape),
+                        ) {
+                            Icon(Icons.Filled.SkipNext, "Cambia player", tint = Color.White)
+                        }
+                    }
+                    IconButton(
+                        onClick = {
+                            autoTries = 0; retrying = false; playerIdx = 0
+                            loading = true; webHolder.loaded = null; attempt++
+                        },
+                        modifier = Modifier.tvFocusable(CircleShape),
+                    ) {
+                        Icon(Icons.Filled.Refresh, "Ricarica", tint = Color.White)
+                    }
+                    IconButton(onClick = onEnterPipNow, modifier = Modifier.tvFocusable(CircleShape)) {
+                        Icon(Icons.Filled.PictureInPictureAlt, "PiP", tint = Color.White)
+                    }
                 }
             }
+        }
+
+        AnimatedVisibility(
+            visible = osdVisible,
+            enter = fadeIn() + slideInVertically { it },
+            exit = fadeOut() + slideOutVertically { it },
+            modifier = Modifier.align(Alignment.BottomStart),
+        ) {
+            ChannelInfoBar(channel, nowNext)
         }
     }
 }
@@ -290,6 +431,11 @@ private fun WebView.configure() {
     }
     isVerticalScrollBarEnabled = false
     isHorizontalScrollBarEnabled = false
+    // let D-pad keys reach Compose (our OSD) instead of the web page's own controls
+    isFocusable = false
+    isFocusableInTouchMode = false
+    // force GPU compositing of the video — SW fallback is the other stutter cause
+    setLayerType(View.LAYER_TYPE_HARDWARE, null)
 
     // Some CDNs (Cloudflare WAF rules) 403 requests carrying WebView's default
     // `X-Requested-With: <package>` header. Drop it where supported.
@@ -299,6 +445,56 @@ private fun WebView.configure() {
         }
     }
 }
+
+private const val MAX_AUTO_TRIES = 4
+
+/**
+ * The daddy player pages configure hls.js with `maxBufferLength: 5` and a very
+ * tight live target — that is what makes the video stutter on anything but a
+ * perfect line. Intercept `window.Hls` and merge in a roomier buffer + a looser
+ * live latency target before Clappr builds the player; also patch a live
+ * instance if one already exists.
+ */
+private const val HLS_TUNE_JS = """
+(function () {
+  try {
+    var TUNE = {
+      maxBufferLength: 30, maxMaxBufferLength: 90, backBufferLength: 30,
+      maxBufferHole: 0.6, highBufferWatchdogPeriod: 3,
+      liveSyncDurationCount: 6, liveMaxLatencyDurationCount: 20,
+      nudgeMaxRetry: 12, appendErrorMaxRetry: 6, fragLoadingMaxRetry: 8,
+      manifestLoadingMaxRetry: 6, levelLoadingMaxRetry: 6
+    };
+    var apply = function (cfg) { cfg = cfg || {}; for (var k in TUNE) cfg[k] = TUNE[k]; return cfg; };
+    var wrap = function (H) {
+      if (!H || H.__tuned) return H;
+      var W = function (cfg) { return new H(apply(cfg)); };
+      W.prototype = H.prototype;
+      for (var s in H) { try { W[s] = H[s]; } catch (e) {} }
+      if (H.DefaultConfig) apply(H.DefaultConfig);
+      W.__tuned = true;
+      return W;
+    };
+    if (window.Hls) { window.Hls = wrap(window.Hls); }
+    else {
+      var real;
+      Object.defineProperty(window, 'Hls', {
+        configurable: true,
+        get: function () { return real; },
+        set: function (v) { real = wrap(v); }
+      });
+    }
+    // also nudge an already-running instance
+    var patchLive = function () {
+      document.querySelectorAll('video').forEach(function (v) {
+        var h = v.__hls || (v.player && v.player._hls);
+        if (h && h.config && !h.config.__tuned) { for (var k in TUNE) h.config[k] = TUNE[k]; h.config.__tuned = true; }
+      });
+    };
+    setTimeout(patchLive, 2000); setTimeout(patchLive, 5000);
+  } catch (e) {}
+})();
+"""
 
 private const val TIDY_JS = """
 (function () {
@@ -336,11 +532,12 @@ private const val TIDY_JS = """
       var v = document.querySelector('video');
       if (v && !v.paused && v.currentTime > 0.3 && v.readyState >= 3) { done = true; report('playing'); return; }
       var bad = (v && v.error) || fragErrors >= 6 ||
-        /Could not play video|not available on your domain|Access Denied/i.test(document.body ? document.body.innerText : '');
+        /Could not play video|not available on your domain|Access Denied|Backend fetch failed|502 Bad|503 |disable your ad|adblock/i.test(document.body ? document.body.innerText : '');
       if (bad) { done = true; report('fatal'); return; }
     };
     var iv = setInterval(tick, 900);
-    setTimeout(function () { if (!done) { clearInterval(iv); if (fragErrors > 0) report('fatal'); } }, 22000);
+    // hard deadline: if nothing is playing by now this backend is a dud → next player
+    setTimeout(function () { if (!done) { done = true; clearInterval(iv); report('fatal'); } }, 18000);
   } catch (e) {}
 })();
 """

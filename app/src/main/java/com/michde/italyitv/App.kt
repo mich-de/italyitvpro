@@ -1,6 +1,7 @@
 package com.michde.italyitv
 
 import android.app.Application
+import com.michde.italyitv.core.Http
 import com.michde.italyitv.data.IptvRepository
 import com.michde.italyitv.data.SettingsStore
 
@@ -10,6 +11,8 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // expired / mismatched TLS certs on IPTV CDNs must not block playback
+        Http.installPermissiveTls()
         container = AppContainer(this)
     }
 }

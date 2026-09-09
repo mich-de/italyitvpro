@@ -11,7 +11,7 @@ object InjectedChannels {
 
     // id -> display name
     private val DLIVE = linkedMapOf(
-        "877" to "DAZN ZONA",
+        "877" to "DAZN 1",
         "878" to "Eurosport 1",
         "879" to "Eurosport 2",
         "854" to "Italia 1",

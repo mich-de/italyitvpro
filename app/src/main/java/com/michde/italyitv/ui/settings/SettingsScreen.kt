@@ -3,6 +3,8 @@ package com.michde.italyitv.ui.settings
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -29,6 +31,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.michde.italyitv.data.model.SyncState
 import com.michde.italyitv.ui.AppViewModel
+import com.michde.italyitv.ui.tvFocusable
 
 @Composable
 fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
@@ -44,7 +47,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
     ) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) {
+            IconButton(onClick = onBack, modifier = Modifier.tvFocusable(CircleShape)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "Indietro", tint = MaterialTheme.colorScheme.onSurface)
             }
             Text("Impostazioni", style = MaterialTheme.typography.titleLarge, fontSize = 20.sp)
@@ -60,7 +63,11 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
         }
 
         Row(
-            Modifier.fillMaxWidth().clickable { vm.refresh() }.padding(16.dp),
+            Modifier.fillMaxWidth()
+                .padding(horizontal = 8.dp)
+                .tvFocusable(RoundedCornerShape(8.dp), scaleUp = false)
+                .clickable { vm.refresh() }
+                .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {

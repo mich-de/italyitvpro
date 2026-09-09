@@ -153,6 +153,11 @@ class IptvRepository(private val settings: SettingsStore) {
         runCatching { DliveResolver.playerPageUrl(channel.url) }.getOrNull()
     }
 
+    /** All "Player 1..N" backends for a dlive channel, in order (walk on failure). */
+    suspend fun dlivePlayerPages(channel: Channel): List<String> = withContext(Dispatchers.IO) {
+        runCatching { DliveResolver.playerPageUrls(channel.url) }.getOrDefault(emptyList())
+    }
+
     /**
      * Resolve a play handle / dlive url to a real stream plus the headers its CDN
      * demands on every request. Always returns something playable-ish; callers
@@ -162,14 +167,16 @@ class IptvRepository(private val settings: SettingsStore) {
         val fallbackRef = channel.referrer?.takeIf { it.isNotBlank() }
         when {
             HuhuApi.isPlayHandle(channel.url) -> {
-                val url = runCatching {
-                    HuhuApi.resolve(channel.url, channel.userAgent ?: Http.OKHTTP_UA)
-                }.getOrDefault(channel.url)
+                val ua = channel.userAgent ?: Http.OKHTTP_UA
+                val urls = runCatching { HuhuApi.resolveAll(channel.url, ua) }
+                    .getOrDefault(emptyList())
+                    .ifEmpty { listOf(channel.url) }
                 ResolvedStream(
-                    url = url,
+                    url = urls.first(),
+                    fallbacks = urls.drop(1),
                     referer = fallbackRef,
                     origin = fallbackRef?.trimEnd('/'),
-                    userAgent = channel.userAgent ?: Http.OKHTTP_UA,
+                    userAgent = ua,
                 )
             }
             DliveResolver.isDlive(channel.url) ->
@@ -180,12 +187,16 @@ class IptvRepository(private val settings: SettingsStore) {
                         origin = fallbackRef?.trimEnd('/'),
                         userAgent = channel.userAgent,
                     )
-            else -> ResolvedStream(
-                url = Http.preferHttp(channel.url),
-                referer = fallbackRef,
-                origin = fallbackRef?.trimEnd('/'),
-                userAgent = channel.userAgent ?: Http.DEFAULT_UA,
-            )
+            else -> {
+                val urls = Http.withHttpFallback(channel.url)
+                ResolvedStream(
+                    url = urls.first(),
+                    fallbacks = urls.drop(1),
+                    referer = fallbackRef,
+                    origin = fallbackRef?.trimEnd('/'),
+                    userAgent = channel.userAgent ?: Http.DEFAULT_UA,
+                )
+            }
         }
     }
 }

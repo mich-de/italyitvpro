@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -58,6 +59,7 @@ import com.michde.italyitv.data.model.Channel
 import com.michde.italyitv.data.model.NowNext
 import com.michde.italyitv.data.model.SyncState
 import com.michde.italyitv.ui.AppViewModel
+import com.michde.italyitv.ui.tvFocusable
 
 @Composable
 fun ChannelsScreen(
@@ -87,17 +89,17 @@ fun ChannelsScreen(
         ) {
             Text("Canali Italia", style = MaterialTheme.typography.titleLarge, fontSize = 22.sp)
             Spacer(Modifier.weight(1f))
-            IconButton(onClick = { vm.toggleFavoritesOnly() }) {
+            IconButton(onClick = { vm.toggleFavoritesOnly() }, modifier = Modifier.tvFocusable(CircleShape)) {
                 Icon(
                     if (ui.favoritesOnly) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                     "Preferiti",
                     tint = if (ui.favoritesOnly) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            IconButton(onClick = { vm.refresh() }) {
+            IconButton(onClick = { vm.refresh() }, modifier = Modifier.tvFocusable(CircleShape)) {
                 Icon(Icons.Filled.Refresh, "Aggiorna", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            IconButton(onClick = onOpenSettings) {
+            IconButton(onClick = onOpenSettings, modifier = Modifier.tvFocusable(CircleShape)) {
                 Icon(Icons.Filled.Settings, "Impostazioni", tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -171,6 +173,7 @@ private fun SearchField(value: String, onValueChange: (String) -> Unit) {
 private fun Chip(text: String, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
+            .tvFocusable(RoundedCornerShape(50))
             .clip(RoundedCornerShape(50))
             .background(
                 if (selected) MaterialTheme.colorScheme.primary
@@ -205,8 +208,11 @@ private fun ChannelRow(ch: Channel, nn: NowNext?, onClick: () -> Unit, onFav: ()
     Row(
         Modifier
             .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .tvFocusable(RoundedCornerShape(8.dp), scaleUp = false)
             .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -241,7 +247,7 @@ private fun ChannelRow(ch: Channel, nn: NowNext?, onClick: () -> Unit, onFav: ()
                 fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
         }
-        IconButton(onClick = onFav) {
+        IconButton(onClick = onFav, modifier = Modifier.tvFocusable(CircleShape)) {
             Icon(
                 if (ch.isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                 "Preferito",

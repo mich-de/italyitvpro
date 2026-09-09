@@ -66,19 +66,27 @@ object HuhuApi {
         }
     }
 
-    /** Resolves a play handle to a real stream URL (http:// to dodge expired certs). */
+    /** Resolves a play handle to the first real stream URL. */
     @Throws(IOException::class)
-    fun resolve(playUrl: String, userAgent: String = UA): String {
+    fun resolve(playUrl: String, userAgent: String = UA): String =
+        resolveAll(playUrl, userAgent).firstOrNull()
+            ?: throw IOException("huhu.to non ha restituito uno stream")
+
+    /**
+     * Every candidate stream URL huhu offers, each also as a plain-http variant,
+     * best first. The player walks this list on failure before re-resolving.
+     */
+    @Throws(IOException::class)
+    fun resolveAll(playUrl: String, userAgent: String = UA): List<String> {
         val body = JSONObject().put("url", playUrl).put("language", "it").put("region", "IT").toString()
         val text = Http.postJson(RESOLVE_URL, body, userAgent)
-        val arr = try { JSONArray(text) } catch (t: Throwable) { null }
-        if (arr != null) {
+        val arr = try { JSONArray(text) } catch (t: Throwable) { null } ?: return emptyList()
+        return buildList {
             for (i in 0 until arr.length()) {
-                val u = arr.optJSONObject(i)?.optString("url")?.takeIf { it.isNotBlank() }
-                if (u != null) return Http.preferHttp(u)
+                val u = arr.optJSONObject(i)?.optString("url")?.takeIf { it.isNotBlank() } ?: continue
+                addAll(Http.withHttpFallback(u))
             }
-        }
-        throw IOException("huhu.to non ha restituito uno stream")
+        }.distinct()
     }
 
     private fun uniqueKey(name: String, used: MutableSet<String>): String {
