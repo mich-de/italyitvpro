@@ -69,6 +69,18 @@ class AppViewModel(
     fun refresh() = viewModelScope.launch { repo.refresh(force = true) }
     fun channel(key: String): Channel? = repo.channels.value.firstOrNull { it.key == key }
 
+    fun findAlternative(channelKey: String): Channel? {
+        val current = channel(channelKey) ?: return null
+        val curKey = NameTools.matchKey(current.name)
+        val isDaddy = current.url.contains("dlive.sx") || current.name.contains("(Daddy)", ignoreCase = true)
+        return repo.channels.value.firstOrNull { other ->
+            other.key != current.key &&
+                NameTools.matchKey(other.name) == curKey &&
+                (if (isDaddy) !other.url.contains("dlive.sx") && !other.name.contains("(Daddy)", ignoreCase = true)
+                 else other.url.contains("dlive.sx") || other.name.contains("(Daddy)", ignoreCase = true))
+        }
+    }
+
     class Factory(private val repo: IptvRepository, private val settings: SettingsStore) :
         ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")

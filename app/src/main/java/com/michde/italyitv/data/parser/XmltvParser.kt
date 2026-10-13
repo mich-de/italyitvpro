@@ -32,7 +32,11 @@ object XmltvParser {
         }.getOrDefault(0L)
     }
 
-    fun parse(input: InputStream, keepProgrammes: Boolean = true): EpgData {
+    fun parse(
+        input: InputStream,
+        keepProgrammes: Boolean = true,
+        minStopMs: Long = System.currentTimeMillis() - 2 * 3600 * 1000L,
+    ): EpgData {
         val channels = ArrayList<EpgChannel>()
         val programmes = ArrayList<Programme>()
         input.use { stream ->
@@ -91,7 +95,7 @@ object XmltvParser {
                             }
                             "programme" -> {
                                 val ch = prgChannel
-                                if (keepProgrammes && ch != null && prgStop > prgStart && !prgTitle.isNullOrBlank()) {
+                                if (keepProgrammes && ch != null && prgStop > prgStart && prgStop >= minStopMs && !prgTitle.isNullOrBlank()) {
                                     programmes.add(
                                         Programme(ch, prgStart, prgStop, prgTitle!!, prgDesc?.toString()?.trim()?.takeIf { it.isNotBlank() })
                                     )

@@ -87,11 +87,13 @@ dependencies {
   implementation(libs.media3.exoplayer)
   implementation(libs.media3.exoplayer.hls)
   implementation(libs.media3.exoplayer.dash)
+  implementation(libs.media3.datasource.okhttp)
   implementation(libs.media3.ui)
   implementation(libs.media3.session)
 
   // Network
   implementation(libs.okhttp)
+  implementation(libs.okhttp.dnsoverhttps)
   implementation(libs.kotlinx.coroutines.android)
 
   // WebView (drop the X-Requested-With header some CDNs use to fingerprint apps)

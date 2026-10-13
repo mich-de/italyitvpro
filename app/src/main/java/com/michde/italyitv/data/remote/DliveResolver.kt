@@ -33,7 +33,7 @@ object DliveResolver {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
-    private val WATCH_HOSTS = listOf("dlive.sx", "dlive.stream")
+    private val WATCH_HOSTS = listOf("dlive.sx", "dlhd.dad", "dlive.to")
     private const val FALLBACK_PREMIUM_HOST = "hamis.romponalis.st"
 
     private val IFRAME = Pattern.compile(
@@ -49,85 +49,197 @@ object DliveResolver {
     )
     /** fallback player-page path segments, in the order dlive lists "Player 1..7". */
     private val PLAYER_SEGMENTS = listOf("stream", "cast", "watch", "plus", "casting", "player", "hub")
-    private const val TIMEOUT = 10_000
+    private const val TIMEOUT = 4_000
 
     fun isDlive(url: String): Boolean =
-        url.contains("dlive.", ignoreCase = true) || url.contains("/watch.php?id=", ignoreCase = true)
+        url.contains("dlive.", ignoreCase = true) ||
+            url.contains("dlhd.", ignoreCase = true) ||
+            url.contains("/watch.php?id=", ignoreCase = true)
 
-    private fun channelId(watchUrl: String): String {
+    fun channelId(watchUrl: String): String {
         val at = watchUrl.indexOf("id=")
-        if (at < 0) return "877"
-        var s = watchUrl.substring(at + 3)
-        val cut = s.indexOfFirst { it == '&' || it == '#' }
-        if (cut != -1) s = s.substring(0, cut)
-        return s.ifBlank { "877" }
+        if (at < 0) return watchUrl.substringAfterLast('/').substringBefore('.')
+        return watchUrl.substring(at + 3).takeWhile { it.isDigit() }
     }
 
     /**
      * The player page to load in a WebView — the bare `…/premiumtv/daddyN.php`
-     * endpoint (clean Clappr + hls.js, no anti-bot blob). It 403s
-     * ("Access Denied - not available on your domain") unless the request carries
-     * `Referer: https://dlive.sx/`, so the WebView must send that header.
-     * Path differs per channel and rotates, so we scrape it, never guess.
+     * endpoint or embedded player wrapper.
      */
     fun playerPageUrl(watchUrl: String?): String? = playerPageUrls(watchUrl).firstOrNull()
 
     /**
-     * The distinct player backends behind dlive's "Player 1..7" selector, in
-     * order — `hamis…/daddyN.php`, `barecrop.net/e/…`, `wideiptv.top/…`, etc.
-     * Each wrapper page (`…/stream/…`, `…/cast/…`, `…/hub/…`) embeds one of these
-     * in an iframe; we pull the iframe src out so the WebView can load the real
-     * player as its main document (referer `https://dlive.sx/`) and, when one is
-     * dead, move straight to the next.
+     * The distinct player backends behind dlive's "Player 1..7" selector, in order:
+     * Player 1: stream/stream-<id>.php
+     * Player 2: cast/stream-<id>.php
+     * Player 3: watch/stream-<id>.php
+     * Player 4: plus/stream-<id>.php
+     * Player 5: casting/stream-<id>.php
+     * Player 6: player/stream-<id>.php
+     *
+     * These official wrappers embed the respective player iframe with all
+     * required origins and headers intact.
      */
     fun playerPageUrls(watchUrl: String?): List<String> {
         if (watchUrl.isNullOrEmpty()) return emptyList()
         val id = channelId(watchUrl)
 
-        // 1. wrapper pages, in the order the site lists them
-        val wrappers: List<String> = run {
-            for (host in WATCH_HOSTS) {
-                val html = httpGet("https://$host/watch.php?id=$id", referer = "https://$host/") ?: continue
-                val m = PLAYER_URL.matcher(html)
-                val urls = LinkedHashSet<String>()
-                while (m.find()) urls.add(m.group(1)!!)
-                if (urls.size >= 2) return@run urls.toList()
-            }
-            val host = WATCH_HOSTS.firstOrNull { httpHead("https://$it/watch.php?id=$id") } ?: WATCH_HOSTS[0]
-            PLAYER_SEGMENTS.map { "https://$host/$it/stream-$id.php" }
-        }
-
-        // 2. resolve each wrapper to the real player URL inside it
-        val backends = LinkedHashSet<String>()
-        for (w in wrappers) {
-            val wHost = hostOf(w)
-            val html = httpGet(w, referer = "https://$wHost/watch.php?id=$id") ?: continue
-            val mi = ANY_IFRAME.matcher(html)
-            if (mi.find()) {
-                val src = absolutize(mi.group(1)!!.trim(), wHost)
-                // keep the #fragment — SPA players (welovetocare, …) need it to pick the channel
-                if (src.startsWith("http") && !src.contains("javascript:") && !src.startsWith("about:")) {
-                    backends.add(src)
+        // 1. Fetch wrappers dynamically from watch.php
+        for (host in WATCH_HOSTS) {
+            val html = httpGet("https://$host/watch.php?id=$id", referer = "https://$host/") ?: continue
+            val m = PLAYER_URL.matcher(html)
+            val urls = LinkedHashSet<String>()
+            while (m.find()) {
+                val u = m.group(1)!!
+                // Keep only /stream/ and /cast/ (Player 1 & 2 -> assetrage & tiestep).
+                // Other wrappers (/watch/, /plus/, /player/) are either dead or redirect to popcdn.dad ad networks.
+                if (u.contains("/stream/") || u.contains("/cast/")) {
+                    urls.add(u)
                 }
             }
+            if (urls.isNotEmpty()) {
+                Log.i(TAG, "playerPages id=$id -> ${urls.size} from $host: $urls")
+                return urls.toList()
+            }
         }
-        if (backends.isNotEmpty()) {
-            Log.i(TAG, "playerPages id=$id -> ${backends.size} backends: $backends")
-            return backends.toList()
-        }
-        Log.w(TAG, "playerPages id=$id -> no backends, using wrappers")
-        return wrappers
+        val host = WATCH_HOSTS.firstOrNull { httpHead("https://$it/watch.php?id=$id") } ?: WATCH_HOSTS[0]
+        val fallback = listOf("https://$host/stream/stream-$id.php", "https://$host/cast/stream-$id.php")
+        Log.i(TAG, "playerPages id=$id -> fallback wrappers: $fallback")
+        return fallback
     }
 
     /** Referer the player page and its stream demand. */
     const val PLAYBACK_REFERER = "https://dlive.sx/"
 
-    /** Raw HLS url + the headers its CDN wants. ExoPlayer path (fallback). */
+    data class DliveStream(
+        val streamUrl: String,
+        val iframeUrl: String,
+        val playerIdx: Int,
+    )
+
+    /**
+     * Directly resolves the high-speed CDN stream URL by extracting the player iframe
+     * and decoding the obfuscated _econfig in Kotlin. This bypasses all website ad scripts,
+     * devtools blockers, sandbox detectors, and P2P Swarmcloud overhead.
+     */
+    suspend fun resolveStreamUrl(watchUrl: String?, playerIndex: Int = 0): DliveStream? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (watchUrl.isNullOrEmpty()) return@withContext null
+            val id = channelId(watchUrl)
+            val segments = if (playerIndex == 1) listOf("cast", "stream", "watch", "player") else listOf("stream", "cast", "watch", "player")
+            for (seg in segments) {
+                val streamPageUrl = "https://dlive.sx/$seg/stream-$id.php"
+                val html = httpGet(streamPageUrl, referer = "https://dlive.sx/watch.php?id=$id") ?: continue
+                val m = ANY_IFRAME.matcher(html)
+                var iframeSrc: String? = null
+                while (m.find()) {
+                    val src = m.group(1).orEmpty()
+                    if (src.contains("/e/") || src.contains("assetrage") || src.contains("tiestep") ||
+                        src.contains("epiembeds") || src.contains("dembed") || src.contains("premiumtv")
+                    ) {
+                        iframeSrc = src
+                        break
+                    }
+                }
+                if (iframeSrc == null) continue
+                val fullIframeUrl = absolutize(iframeSrc, "dlive.sx")
+                val iframeHtml = httpGet(fullIframeUrl, referer = "https://dlive.sx/") ?: continue
+                val directUrl = extractStreamUrl(iframeHtml)
+                if (directUrl != null && directUrl.startsWith("http")) {
+                    if (isStreamLive(directUrl)) {
+                        val actualIdx = if (seg == "cast") 1 else 0
+                        Log.i(TAG, "Directly resolved id=$id ($seg) -> $directUrl")
+                        return@withContext DliveStream(directUrl, fullIframeUrl, actualIdx)
+                    } else {
+                        Log.w(TAG, "Stream $directUrl not live for seg=$seg, trying next")
+                    }
+                }
+            }
+            null
+        }
+
+    private fun isStreamLive(url: String): Boolean = try {
+        val referer = when {
+            url.contains("cowedd") || url.contains("dembed") -> "https://dembed.st/"
+            else -> "https://assetrage.net/"
+        }
+        val req = okhttp3.Request.Builder()
+            .url(url)
+            .header("User-Agent", UA)
+            .header("Referer", referer)
+            .head()
+            .build()
+        com.michde.italyitv.core.Http.client.newCall(req).execute().use { res ->
+            res.isSuccessful
+        }
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * Extracts the direct CDN HLS stream URL from the obfuscated window._econfig string or
+     * direct SRC assignment in Daddy player pages.
+     */
+    fun extractStreamUrl(html: String): String? {
+        val srcPattern = Pattern.compile("""(?:const|var|let)\s+SRC\s*=\s*['"]([^'"]+)['"]""")
+        val srcMatcher = srcPattern.matcher(html)
+        if (srcMatcher.find()) {
+            val src = srcMatcher.group(1)?.trim()
+            if (!src.isNullOrEmpty() && src.startsWith("http")) return src
+        }
+
+        val pattern = Pattern.compile("""window\._econfig\s*=\s*['"]([^'"]+)['"]""")
+        val matcher = pattern.matcher(html)
+        if (!matcher.find()) return null
+        val rawB64 = matcher.group(1) ?: return null
+
+        return try {
+            val arrOrder = intArrayOf(2, 0, 3, 1)
+            val raw = Base64.decode(rawB64, Base64.DEFAULT)
+            val q = (raw.size + 3) / 4
+            val chunks = Array(4) { i ->
+                val start = i * q
+                val end = (start + q).coerceAtMost(raw.size)
+                if (start < raw.size) raw.copyOfRange(start, end) else ByteArray(0)
+            }
+            val reordered = Array(4) { ByteArray(0) }
+            for (i in 0 until 4) {
+                val chunkStr = String(chunks[i], Charsets.ISO_8859_1)
+                val trimmed = if (chunkStr.length > 4) chunkStr.substring(0, 3) + chunkStr.substring(4) else chunkStr
+                val decodedChunk = Base64.decode(trimmed.toByteArray(Charsets.ISO_8859_1), Base64.DEFAULT)
+                reordered[arrOrder[i]] = decodedChunk
+            }
+            val combined = reordered.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+            val finalJson = String(Base64.decode(combined, Base64.DEFAULT), Charsets.UTF_8)
+            val json = org.json.JSONObject(finalJson)
+            val nop2p = json.optString("stream_url_nop2p").trim()
+            val stream = json.optString("stream_url").trim()
+            val chosen = if (nop2p.startsWith("http")) nop2p else stream
+            if (chosen.startsWith("http")) chosen else null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed extracting stream_url from _econfig: ${e.message}")
+            null
+        }
+    }
+
+    /** Raw HLS url + the headers its CDN wants. */
     fun resolve(watchUrl: String?): ResolvedStream? {
         if (watchUrl.isNullOrEmpty()) return null
         val id = channelId(watchUrl)
 
+        // Try direct stream extraction first
         val iframe = findIframe(id)
+        if (iframe != null) {
+            val iframeHtml = httpGet(iframe, referer = "https://dlive.sx/")
+            if (iframeHtml != null) {
+                val direct = extractStreamUrl(iframeHtml)
+                if (direct != null && direct.startsWith("http")) {
+                    val origin = "https://${hostOf(iframe)}"
+                    return ResolvedStream(direct, "$origin/", origin, UA)
+                }
+            }
+        }
+
         val candidates = buildList {
             iframe?.let { add(it) }
             for (n in listOf("", "2", "3", "4", "5")) {

@@ -38,6 +38,7 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val sync by vm.syncState.collectAsStateWithLifecycle()
     var showStats by remember { mutableStateOf(vm.settings.showStats) }
+    var hageziDns by remember { mutableStateOf(vm.settings.hageziDns) }
 
     Column(
         Modifier
@@ -59,6 +60,17 @@ fun SettingsScreen(vm: AppViewModel, onBack: () -> Unit) {
         ) {
             Switch(checked = showStats, onCheckedChange = {
                 showStats = it; vm.settings.showStats = it
+            })
+        }
+
+        SettingRow(
+            title = "DNS Sicuro HaGeZi (DoH)",
+            subtitle = "Protezione integrata contro malware, phishing e adware tramite root.hagezi.org",
+        ) {
+            Switch(checked = hageziDns, onCheckedChange = {
+                hageziDns = it
+                vm.settings.hageziDns = it
+                com.michde.italyitv.core.Http.useHageziDns = it
             })
         }
 

@@ -32,6 +32,9 @@ import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -68,6 +71,9 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import com.michde.italyitv.core.Http
+import java.util.concurrent.TimeUnit
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -97,12 +103,14 @@ fun PlayerScreen(
     vm: AppViewModel,
     channelKey: String,
     onBack: () -> Unit,
+    onSwitchChannel: (String) -> Unit = {},
     onSetAutoPip: (Boolean) -> Unit,
     onEnterPipNow: () -> Unit,
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val channel = remember(channelKey) { vm.channel(channelKey) }
+    val altChannel = remember(channelKey) { vm.findAlternative(channelKey) }
     val nowNextMap by vm.nowNext.collectAsStateWithLifecycle()
     val nowNext = nowNextMap[channelKey]
 
@@ -133,12 +141,16 @@ fun PlayerScreen(
     }
 
     // one factory instance, headers updated per-resolution before each prepare()
+    // backed by Http.client (which routes DNS queries via HaGeZi DoH anti-malware)
+    val mediaOkClient = remember {
+        Http.client.newBuilder()
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
+            .build()
+    }
     val httpFactory = remember {
-        DefaultHttpDataSource.Factory()
+        OkHttpDataSource.Factory(mediaOkClient)
             .setUserAgent(channel?.userAgent ?: "Mozilla/5.0")
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(12_000)
-            .setReadTimeoutMs(25_000) // huhu origins can take ~12 s to first byte on a cold hit
     }
     val player = remember {
         // huhu CDNs are slow to first byte — start playback on a small buffer,
@@ -167,7 +179,8 @@ fun PlayerScreen(
         error = null
         streamUrls = emptyList()
         val ch = channel ?: run { error = "Canale non trovato"; return@LaunchedEffect }
-        val r = runCatching { vm.repo.resolveStream(ch) }
+        if (attempt > 0) vm.repo.invalidateStreamCache(channelKey)
+        val r = runCatching { vm.repo.resolveStream(ch, forceFresh = attempt > 0) }
             .getOrElse { error = "Risoluzione fallita: ${it.message}"; null }
             ?: return@LaunchedEffect
         httpFactory.setUserAgent(r.userAgent ?: ch.userAgent ?: "Mozilla/5.0")
@@ -200,16 +213,25 @@ fun PlayerScreen(
                 // slow re-resolve — and only fall back to a fresh URL if that
                 // keeps failing. Never tear down the screen for a transient error.
                 val now = System.currentTimeMillis()
-                if (now - lastErrorAt > 25_000) recoveries = 0 // was stable → fresh budget
+                if (now - lastErrorAt > 20_000) recoveries = 0 // was stable → fresh budget
                 lastErrorAt = now
                 recoveries++
+
+                val isTimeoutOrHttpFail = e.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ||
+                    e.errorCode == PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS
+
                 when {
-                    recoveries <= 2 -> runCatching { player.prepare() } // in-place, same url
-                    player.hasNextMediaItem() -> runCatching {          // try the next candidate url
-                        player.seekToNextMediaItem(); player.prepare()
+                    isTimeoutOrHttpFail && player.hasNextMediaItem() -> runCatching {
+                        player.seekToNextMediaItem()
+                        player.prepare()
                     }
-                    channel?.needsResolve == true && recoveries <= 6 ->
-                        attempt++ // re-resolve fresh url(s) from scratch
+                    recoveries <= 1 && !isTimeoutOrHttpFail -> runCatching { player.prepare() }
+                    player.hasNextMediaItem() -> runCatching {
+                        player.seekToNextMediaItem()
+                        player.prepare()
+                    }
+                    channel?.needsResolve == true && recoveries <= 3 ->
+                        attempt++ // re-resolve fresh url(s)
                     else -> error = playbackErrorText(e)
                 }
             }
@@ -236,9 +258,28 @@ fun PlayerScreen(
                     code == AndroidKeyEvent.KEYCODE_VOLUME_UP ||
                     code == AndroidKeyEvent.KEYCODE_VOLUME_DOWN ||
                     code == AndroidKeyEvent.KEYCODE_VOLUME_MUTE
+                val isUp = code == AndroidKeyEvent.KEYCODE_DPAD_UP ||
+                    code == AndroidKeyEvent.KEYCODE_CHANNEL_UP ||
+                    code == AndroidKeyEvent.KEYCODE_PAGE_UP ||
+                    code == AndroidKeyEvent.KEYCODE_INFO
+                val isDown = code == AndroidKeyEvent.KEYCODE_DPAD_DOWN ||
+                    code == AndroidKeyEvent.KEYCODE_CHANNEL_DOWN ||
+                    code == AndroidKeyEvent.KEYCODE_PAGE_DOWN
                 when {
                     ignored -> false
                     e.type != KeyEventType.KeyDown -> false
+                    isUp -> {
+                        showStats = !showStats
+                        vm.settings.showStats = showStats
+                        wake()
+                        true
+                    }
+                    isDown && showStats -> {
+                        showStats = false
+                        vm.settings.showStats = false
+                        wake()
+                        true
+                    }
                     !osdVisible -> { wake(); true }   // first press just reveals the OSD
                     else -> { osdNonce++; false }     // OSD already up → keep it up, let buttons navigate
                 }
@@ -264,7 +305,12 @@ fun PlayerScreen(
         // buffering / error
         val playing by playbackFlags(player)
         if (error != null) {
-            ErrorPanel(error!!, onRetry = { attempt++ })
+            ErrorPanel(
+                message = error!!,
+                altChannel = altChannel,
+                onSwitchChannel = onSwitchChannel,
+                onRetry = { attempt++ },
+            )
         } else if (!playing.ready) {
             Column(
                 Modifier.align(Alignment.Center),
@@ -274,9 +320,21 @@ fun PlayerScreen(
                 if (channel?.needsResolve == true) {
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Avvio sorgente… può richiedere ~10 s al primo caricamento",
-                        color = Color(0xFFAAAAAA), fontSize = 12.sp,
+                        "Connessione al server…",
+                        color = Color.White, fontSize = 13.sp,
                     )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "I flussi huhu possono richiedere qualche secondo per l'avvio del relay upstream.",
+                        color = Color(0xFFAAAAAA), fontSize = 11.sp,
+                    )
+                    if (altChannel != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Disponibile alternativa: ${altChannel.name}",
+                            color = MaterialTheme.colorScheme.primary, fontSize = 12.sp,
+                        )
+                    }
                 }
             }
         }
@@ -304,6 +362,18 @@ fun PlayerScreen(
                     channel?.name ?: "", color = Color.White, fontSize = 15.sp,
                     maxLines = 1, modifier = Modifier.weight(1f),
                 )
+                if (altChannel != null) {
+                    IconButton(
+                        onClick = { onSwitchChannel(altChannel.key) },
+                        modifier = Modifier.tvFocusable(CircleShape),
+                    ) {
+                        Icon(
+                            Icons.Filled.SwapHoriz,
+                            "Passa a ${altChannel.name}",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 IconButton(
                     onClick = { showStats = !showStats; vm.settings.showStats = showStats },
                     modifier = Modifier.tvFocusable(CircleShape),
@@ -342,6 +412,7 @@ fun PlayerScreen(
             StatsOverlay(
                 player = player,
                 channel = channel,
+                dohEnabled = vm.settings.hageziDns,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(top = 84.dp, end = 16.dp),
@@ -351,7 +422,12 @@ fun PlayerScreen(
 }
 
 @Composable
-private fun ErrorPanel(message: String, onRetry: () -> Unit) {
+private fun ErrorPanel(
+    message: String,
+    altChannel: Channel? = null,
+    onSwitchChannel: ((String) -> Unit)? = null,
+    onRetry: () -> Unit,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -361,11 +437,29 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
     ) {
         Text("Impossibile riprodurre", color = Color.White, fontSize = 17.sp)
         Spacer(Modifier.padding(4.dp))
-        Text(message, color = Color(0xFFBBBBBB), fontSize = 13.sp,
-            modifier = Modifier.padding(horizontal = 40.dp))
-        Spacer(Modifier.padding(8.dp))
-        IconButton(onClick = onRetry, modifier = Modifier.tvFocusable(CircleShape)) {
-            Icon(Icons.Filled.Refresh, "Riprova", tint = Color.White)
+        Text(
+            message, color = Color(0xFFBBBBBB), fontSize = 13.sp,
+            modifier = Modifier.padding(horizontal = 40.dp),
+        )
+        Spacer(Modifier.padding(12.dp))
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onRetry, modifier = Modifier.tvFocusable(CircleShape)) {
+                Icon(Icons.Filled.Refresh, "Riprova", tint = Color.White)
+            }
+            if (altChannel != null && onSwitchChannel != null) {
+                Button(
+                    onClick = { onSwitchChannel(altChannel.key) },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    modifier = Modifier.tvFocusable(RoundedCornerShape(20.dp)),
+                ) {
+                    Icon(Icons.Filled.SwapHoriz, null, tint = Color.Black)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Passa a ${altChannel.name}", color = Color.Black)
+                }
+            }
         }
     }
 }
@@ -373,9 +467,9 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 private fun playbackErrorText(e: PlaybackException): String = when (e.errorCode) {
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT ->
-        "Rete non raggiungibile o CDN bloccato. Prova un'altra rete."
+        "Timeout di connessione alla sorgente. Il relay upstream del canale potrebbe essere in standby o temporaneamente offline. Prova la versione (Daddy) se disponibile."
     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ->
-        "Il server dello stream ha risposto con errore (potrebbe essere offline)."
+        "Il server dello stream ha risposto con errore (502/503/403). Il feed potrebbe essere offline o bloccato. Prova la versione (Daddy)."
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED ->
         "Formato dello stream non supportato."

@@ -112,10 +112,15 @@ fun playbackFlags(player: Player): State<PlaybackFlags> {
 
 @OptIn(UnstableApi::class)
 @Composable
-fun StatsOverlay(player: ExoPlayer, channel: Channel?, modifier: Modifier = Modifier) {
-    val text by produceState("", player) {
+fun StatsOverlay(
+    player: ExoPlayer,
+    channel: Channel?,
+    dohEnabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    val text by produceState("", player, dohEnabled) {
         while (true) {
-            value = buildStats(player, channel)
+            value = buildStats(player, channel, dohEnabled)
             delay(1000)
         }
     }
@@ -132,7 +137,7 @@ fun StatsOverlay(player: ExoPlayer, channel: Channel?, modifier: Modifier = Modi
 }
 
 @OptIn(UnstableApi::class)
-private fun buildStats(player: ExoPlayer, channel: Channel?): String {
+private fun buildStats(player: ExoPlayer, channel: Channel?, dohEnabled: Boolean): String {
     val sb = StringBuilder()
     val vf: Format? = player.videoFormat
     val af: Format? = player.audioFormat
@@ -175,6 +180,7 @@ private fun buildStats(player: ExoPlayer, channel: Channel?): String {
     val est = player.totalBufferedDuration
     sb.append("caricato: ${est / 1000}s\n")
 
-    channel?.let { sb.append("sorgente: ").append(if (it.needsResolve) "risolto" else "diretto") }
+    channel?.let { sb.append("sorgente: ").append(if (it.needsResolve) "risolto" else "diretto").append('\n') }
+    sb.append("dns     : ").append(if (dohEnabled) "HaGeZi DoH (anti-malware)" else "DNS di sistema")
     return sb.toString()
 }

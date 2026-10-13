@@ -41,6 +41,8 @@ object InjectedChannels {
         "872" to "Sky Calcio 2 (252)",
         "873" to "Sky Calcio 3 (253)",
         "874" to "Sky Calcio 4 (254)",
+        "3" to "Sky Sport 252",
+        "2" to "Sky Sport 253",
         "875" to "Sky Sport Basket",
         "460" to "Sky Sport Max",
         "461" to "Sky Sport Uno",

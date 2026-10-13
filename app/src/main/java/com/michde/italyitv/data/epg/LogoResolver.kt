@@ -46,10 +46,32 @@ class LogoResolver private constructor(
 
         val EMPTY = LogoResolver(emptyMap())
 
-        fun load(): LogoResolver {
+        fun load(context: android.content.Context? = null): LogoResolver {
+            val cacheFile = context?.cacheDir?.resolve("logos_cache.json")
+            if (cacheFile != null && cacheFile.exists() &&
+                (System.currentTimeMillis() - cacheFile.lastModified() < 7 * 24 * 3600 * 1000L)
+            ) {
+                val cached = runCatching {
+                    val json = org.json.JSONObject(cacheFile.readText())
+                    val m = HashMap<String, String>(json.length())
+                    val keys = json.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        m[k] = json.getString(k)
+                    }
+                    LogoResolver(m)
+                }.getOrNull()
+                if (cached != null && cached.size > 0) return cached
+            }
             val m = HashMap<String, String>()
             runCatching { loadTvLogos(m) }
             runCatching { loadFreeTv(m) }   // Free-TV wins ties (imgur reliability)
+            if (m.isNotEmpty() && cacheFile != null) {
+                runCatching {
+                    val json = org.json.JSONObject(m as Map<*, *>)
+                    cacheFile.writeText(json.toString())
+                }
+            }
             return LogoResolver(m)
         }
 

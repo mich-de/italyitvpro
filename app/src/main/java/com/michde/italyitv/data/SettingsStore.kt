@@ -14,6 +14,10 @@ class SettingsStore(context: Context) {
         get() = prefs.getBoolean("show_stats", false)
         set(v) = prefs.edit().putBoolean("show_stats", v).apply()
 
+    var hageziDns: Boolean
+        get() = prefs.getBoolean("hagezi_dns", true)
+        set(v) = prefs.edit().putBoolean("hagezi_dns", v).apply()
+
     var italianOnly: Boolean
         get() = prefs.getBoolean("italian_only", false)
         set(v) = prefs.edit().putBoolean("italian_only", v).apply()

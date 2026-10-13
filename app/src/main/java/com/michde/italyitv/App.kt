@@ -14,10 +14,11 @@ class App : Application() {
         // expired / mismatched TLS certs on IPTV CDNs must not block playback
         Http.installPermissiveTls()
         container = AppContainer(this)
+        Http.useHageziDns = container.settings.hageziDns
     }
 }
 
 class AppContainer(app: Application) {
     val settings: SettingsStore by lazy { SettingsStore(app) }
-    val repository: IptvRepository by lazy { IptvRepository(settings) }
+    val repository: IptvRepository by lazy { IptvRepository(app, settings) }
 }

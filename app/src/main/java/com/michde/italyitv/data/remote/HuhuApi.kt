@@ -31,11 +31,20 @@ object HuhuApi {
                 .put("filter", JSONObject().put("group", GROUP))
                 .put("cursor", cursor).put("language", "it").put("region", "IT")
                 .toString()
-            val json = try {
-                JSONObject(Http.postJson(CATALOG_URL, body, UA))
-            } catch (t: Throwable) {
-                throw IOException("Risposta non valida da huhu.to", t)
+            var lastErr: Throwable? = null
+            var parsed: JSONObject? = null
+            for (attempt in 1..3) {
+                try {
+                    parsed = JSONObject(Http.postJson(CATALOG_URL, body, UA))
+                    break
+                } catch (t: Throwable) {
+                    lastErr = t
+                    if (attempt < 3) Thread.sleep(800L * attempt)
+                }
             }
+            val json = parsed ?: throw IOException(
+                "huhu.to: ${lastErr?.javaClass?.simpleName}: ${lastErr?.message}", lastErr,
+            )
             parsePage(json, usedKeys, out)
             val nc = if (json.isNull("nextCursor")) null else json.optInt("nextCursor")
             cursor = if (nc == null || nc == cursor) null else nc
@@ -79,7 +88,7 @@ object HuhuApi {
     @Throws(IOException::class)
     fun resolveAll(playUrl: String, userAgent: String = UA): List<String> {
         val body = JSONObject().put("url", playUrl).put("language", "it").put("region", "IT").toString()
-        val text = Http.postJson(RESOLVE_URL, body, userAgent)
+        val text = Http.postJsonFast(RESOLVE_URL, body, userAgent)
         val arr = try { JSONArray(text) } catch (t: Throwable) { null } ?: return emptyList()
         return buildList {
             for (i in 0 until arr.length()) {

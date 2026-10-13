@@ -15,6 +15,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -51,6 +52,12 @@ class MainActivity : ComponentActivity() {
                 val stack = remember { mutableStateListOf<Screen>(Screen.Splash) }
                 val current = stack.last()
 
+                LaunchedEffect(Unit) {
+                    if (intent?.getBooleanExtra("force_refresh", false) == true) {
+                        vm.refresh()
+                    }
+                }
+
                 fun go(s: Screen) { stack.add(s) }
                 fun back() { if (stack.size > 1) stack.removeAt(stack.lastIndex) else finish() }
 
@@ -79,11 +86,16 @@ class MainActivity : ComponentActivity() {
                         is Screen.Settings -> SettingsScreen(vm) { back() }
                         is Screen.Player -> {
                             val ch = vm.channel(s.channelKey)
+                            val switchChan: (String) -> Unit = { newKey ->
+                                if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex)
+                                stack.add(Screen.Player(newKey))
+                            }
                             if (ch != null && DliveResolver.isDlive(ch.url)) {
                                 WebPlayerScreen(
                                     vm = vm,
                                     channelKey = s.channelKey,
                                     onBack = { autoPip = false; back() },
+                                    onSwitchChannel = switchChan,
                                     onSetAutoPip = { autoPip = it },
                                     onEnterPipNow = { enterPip() },
                                 )
@@ -92,6 +104,7 @@ class MainActivity : ComponentActivity() {
                                     vm = vm,
                                     channelKey = s.channelKey,
                                     onBack = { autoPip = false; back() },
+                                    onSwitchChannel = switchChan,
                                     onSetAutoPip = { autoPip = it },
                                     onEnterPipNow = { enterPip() },
                                 )
